@@ -1,0 +1,39 @@
+{% extends "base.html.j2" %}
+{% block content %}
+<div class="col-md-6 mx-auto mt-5">
+  <div class="card border-warning shadow-sm">
+    <div class="card-header bg-warning text-dark">
+      <h4 class="mb-0">⚠️ Content Warning Notice</h4>
+    </div>
+    <div class="card-body">
+      <p>Your post content triggered our automated review system:</p>
+      
+      <div class="alert alert-light border mb-3">
+        <strong>Risk Score:</strong> {{ score }} / 5.0<br>
+        <strong>Reason:</strong> {{ reason }}
+      </div>
+
+      <h5>Your Post Preview:</h5>
+      <blockquote class="blockquote bg-light p-3 rounded text-muted">
+        {{ original_content }}
+      </blockquote>
+
+      <p class="text-secondary small">
+        You are still allowed to post this message, but it may be flagged for review on the admin dashboard.
+      </p>
+
+      <div class="d-flex justify-content-between mt-4">
+        <!-- Return to feed / edit -->
+        <a href="{{ url_for('feed') }}" class="btn btn-secondary">Edit Post</a>
+
+        <!-- Submit anyway -->
+        <form action="{{ url_for('add_post') }}" method="POST">
+          <input type="hidden" name="content" value="{{ original_content }}">
+          <input type="hidden" name="confirm_warning" value="true">
+          <button type="submit" class="btn btn-warning">Post Anyway</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

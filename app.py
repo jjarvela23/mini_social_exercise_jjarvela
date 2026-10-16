@@ -27,6 +27,11 @@ TIER1_WORDS = MODERATION_CONFIG['categories']['tier1_severe_violations']['words'
 TIER2_PHRASES = MODERATION_CONFIG['categories']['tier2_spam_scams']['phrases']
 TIER3_WORDS = MODERATION_CONFIG['categories']['tier3_mild_profanity']['words']
 
+# ideas: 
+# add a line below the username that shows if one of your friends is following an account. design claim 14
+# design claim 16: personal conversations
+# polls
+
 def get_db():
     """
     Connect to the application's configured database. The connection
@@ -884,9 +889,84 @@ def user_risk_analysis(user_id):
         Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
     
-    score = 0
+    """score = 0
 
     return score;
+    """
+    """
+    Calculates the comprehensive Risk Score for a user based on:
+    - Profile Content Score
+    - Average Post Content Score
+    - Average Comment Content Score
+    - Account Age Multipliers
+    
+    Returns a float capped at a maximum of 5.0.
+    """
+    
+    # Fetch user details
+    user = query_db('SELECT profile, created_at FROM users WHERE id = ?', (user_id,), one=True)
+    if not user:
+        return 0.0
+
+    # Determine account age in days
+    user_created_at = user['created_at']
+    if isinstance(user_created_at, str):
+        user_created_at = datetime.strptime(user_created_at, '%Y-%m-%d %H:%M:%S')
+    
+    account_age_days = (datetime.utcnow() - user_created_at).days
+
+    # --- Step 1: Profile Score ---
+    profile_text = user['profile'] or ""
+    _, profile_score = moderate_content(profile_text)
+
+    # --- Step 2: Average Post Score ---
+    posts = query_db('SELECT content FROM posts WHERE user_id = ?', (user_id,))
+    if posts:
+        total_post_score = sum(moderate_content(p['content'])[1] for p in posts)
+        average_post_score = total_post_score / len(posts)
+    else:
+        average_post_score = 0.0
+
+    # --- Step 3: Average Comment Score ---
+    comments = query_db('SELECT content FROM comments WHERE user_id = ?', (user_id,))
+    if comments:
+        total_comment_score = sum(moderate_content(c['content'])[1] for c in comments)
+        average_comment_score = total_comment_score / len(comments)
+    else:
+        average_comment_score = 0.0
+
+    # --- Step 4: Combine Scores ---
+    content_risk_score = (profile_score * 1) + (average_post_score * 3) + (average_comment_score * 1)
+
+    # --- Step 5: Apply Age Multiplier ---
+    if account_age_days < 7:
+        user_risk_score = content_risk_score * 1.5
+    elif account_age_days < 30:
+        user_risk_score = content_risk_score * 1.2
+    else:
+        user_risk_score = content_risk_score
+
+    # --- Step 6: Final Capping ---
+    return min(5.0, round(user_risk_score, 2))
+
+
+def get_item_risk_score(content, author_created_at):
+    """
+    Helper for Rule 2.1: Post & Comment Risk Score calculation.
+    Determines an individual post or comment's risk score based on content score
+    and author's account age (<7 days = 1.5x multiplier).
+    """
+    _, base_score = moderate_content(content)
+    
+    if isinstance(author_created_at, str):
+        author_created_at = datetime.strptime(author_created_at, '%Y-%m-%d %H:%M:%S')
+        
+    account_age_days = (datetime.utcnow() - author_created_at).days
+    
+    if account_age_days < 7:
+        return base_score * 1.5
+    
+    return base_score
 
     
 # Assignment 2.1
@@ -906,11 +986,86 @@ def moderate_content(content):
             password: admin
     Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
+    """
+    Moderates content using a two-stage evaluation process:
+    - Stage 1.1: Severe violation checks (Immediate removal, max score 5.0).
+    - Stage 1.2: Scored violations & filtering (Additive scoring starting at 0.0).
+    """
+    if not content or not content.strip():
+        return content, 0.0
 
-    moderated_content = content
-    score = 0
+    # ---------------------------------------------------------
+    # Stage 1.1: Severe Violation Checks
+    # ---------------------------------------------------------
+
+    # Rule 1.1.1 (Tier 1 Words): Case-insensitive, whole-word search
+    for word in TIER1_WORDS:
+        pattern = re.compile(rf'\b{re.escape(word)}\b', re.IGNORECASE)
+        if pattern.search(content):
+            return "[content removed due to severe violation]", 5.0
+
+    # Rule 1.1.2 (Tier 2 Phrases): Case-insensitive, whole-phrase search
+    for phrase in TIER2_PHRASES:
+        pattern = re.compile(re.escape(phrase), re.IGNORECASE)
+        if pattern.search(content):
+            return "[content removed due to spam/scam policy]", 5.0
+
+    # ---------------------------------------------------------
+    # Stage 1.2: Scored Violations & Filtering
+    # ---------------------------------------------------------
+    content_score = 0.0
+    moderated_text = content
+
+    # Rule 1.2.1 (Tier 3 Words): Whole-word replacement with *, +2.0 per match
+    for word in TIER3_WORDS:
+        pattern = re.compile(rf'\b{re.escape(word)}\b', re.IGNORECASE)
+        matches = len(pattern.findall(moderated_text))
+        if matches > 0:
+            content_score += matches * 2.0
+            moderated_text = pattern.sub('*' * len(word), moderated_text)
+
+    # Rule 1.2.2 (External Links): Regex URL detection, replacement with [link removed], +2.0 per match
+    url_pattern = re.compile(r'https?://\S+|www\.\S+', re.IGNORECASE)
+    url_matches = len(url_pattern.findall(moderated_text))
+    if url_matches > 0:
+        content_score += url_matches * 2.0
+        moderated_text = url_pattern.sub('[link removed]', moderated_text)
+
+    # Rule 1.2.3 (Excessive Capitalization): >15 alphabetic chars & >70% uppercase -> +0.5
+    alpha_chars = [c for c in moderated_text if c.isalpha()]
+    if len(alpha_chars) > 15:
+        uppercase_count = sum(1 for c in alpha_chars if c.isupper())
+        if (uppercase_count / len(alpha_chars)) > 0.70:
+            content_score += 0.5
+
+    moderated_content = moderated_text
     
-    return moderated_content, score
+    return moderated_content, content_score
+
+
+#assignment 2.3
+#function which is called before posting that checks if the user should be warned before posting.
+
+def evaluate_post_risk(content):
+    """
+    Evaluates post content prior to saving.
+    Returns (moderated_content, content_score, needs_warning, warning_reason).
+    """
+    moderated_content, score = moderate_content(content)
+    WARNING_SCORE_THRESHOLD = 3.0
+    
+    needs_warning = False
+    warning_reason = None
+
+    # Check if the score exceeds the acceptable threshold
+    if score >= WARNING_SCORE_THRESHOLD:
+        needs_warning = True
+        if score >= 5.0:
+            warning_reason = "High risk content detected (severe policy violation or multiple links/profanities)."
+        else:
+            warning_reason = "Medium risk content detected (e.g., links, excessive caps, or profanity)."
+
+    return moderated_content, score, needs_warning, warning_reason
 
 # Coding Assignment #3
 # Assignment 3.1
