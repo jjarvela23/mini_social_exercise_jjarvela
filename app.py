@@ -218,22 +218,43 @@ def add_post():
 
     # Get content from the submitted form
     content = request.form.get('content')
+    confirm_warning = request.form.get('confirm_warning') == 'true'
 
-    # Pass the user's content through the moderation function
-    moderated_content = content
+    if not content or not content.strip():
+        flash('Post cannot be empty.', 'warning')
+        return redirect(url_for('feed'))
 
-    # Basic validation to ensure post is not empty
-    if moderated_content and moderated_content.strip():
-        db = get_db()
-        db.execute('INSERT INTO posts (user_id, content) VALUES (?, ?)',
-                   (user_id, moderated_content))
-        db.commit()
-        flash('Your post was successfully created!', 'success')
+    # Run moderation check
+    moderated_content, score, needs_warning, warning_reason = evaluate_post_risk(content)
+
+    # Block severe removals (Stage 1.1) from posting if content was stripped completely
+    #if moderated_content.startswith("[content removed"):
+     #   flash('Your post cannot be submitted due to severe policy violations.', 'danger')
+      #  return redirect(url_for('feed'))
+
+    # If post needs a warning AND user hasn't explicitly confirmed it yet
+    if needs_warning and not confirm_warning:
+        return render_template(
+            'post_warning.html.j2',
+            original_content=content,
+            moderated_content=moderated_content,
+            score=score,
+            reason=warning_reason
+        )
+
+    # Save post to database if no warning was needed OR user confirmed after warning
+    db = get_db()
+    db.execute(
+        'INSERT INTO posts (user_id, content) VALUES (?, ?)',
+        (user_id, content)  # Or save `moderated_content` depending on your storage preference
+    )
+    db.commit()
+
+    if confirm_warning:
+        flash('Your post was submitted with a content warning flag.', 'info')
     else:
-        # This will catch empty posts or posts that were fully censored
-        flash('Post cannot be empty or was fully censored.', 'warning')
+        flash('Your post was successfully created!', 'success')
 
-    # Redirect back to the main feed to see the new post
     return redirect(url_for('feed'))
     
     
@@ -889,21 +910,7 @@ def user_risk_analysis(user_id):
         Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
     
-    """score = 0
-
-    return score;
-    """
-    """
-    Calculates the comprehensive Risk Score for a user based on:
-    - Profile Content Score
-    - Average Post Content Score
-    - Average Comment Content Score
-    - Account Age Multipliers
-    
-    Returns a float capped at a maximum of 5.0.
-    """
-    
-    # Fetch user details
+    # Fetch user from database
     user = query_db('SELECT profile, created_at FROM users WHERE id = ?', (user_id,), one=True)
     if not user:
         return 0.0
@@ -917,11 +924,13 @@ def user_risk_analysis(user_id):
 
     # --- Step 1: Profile Score ---
     profile_text = user['profile'] or ""
+    # check the content of the users profile
     _, profile_score = moderate_content(profile_text)
 
     # --- Step 2: Average Post Score ---
     posts = query_db('SELECT content FROM posts WHERE user_id = ?', (user_id,))
     if posts:
+        #calculate average score from all posts
         total_post_score = sum(moderate_content(p['content'])[1] for p in posts)
         average_post_score = total_post_score / len(posts)
     else:
@@ -930,15 +939,18 @@ def user_risk_analysis(user_id):
     # --- Step 3: Average Comment Score ---
     comments = query_db('SELECT content FROM comments WHERE user_id = ?', (user_id,))
     if comments:
+        #calculate average score from comments
         total_comment_score = sum(moderate_content(c['content'])[1] for c in comments)
         average_comment_score = total_comment_score / len(comments)
     else:
         average_comment_score = 0.0
 
     # --- Step 4: Combine Scores ---
+    # post score is weighted more. 
     content_risk_score = (profile_score * 1) + (average_post_score * 3) + (average_comment_score * 1)
 
     # --- Step 5: Apply Age Multiplier ---
+    # newer accounts get a higher risk score
     if account_age_days < 7:
         user_risk_score = content_risk_score * 1.5
     elif account_age_days < 30:
@@ -947,26 +959,8 @@ def user_risk_analysis(user_id):
         user_risk_score = content_risk_score
 
     # --- Step 6: Final Capping ---
+    #cap the value at 5.0
     return min(5.0, round(user_risk_score, 2))
-
-
-def get_item_risk_score(content, author_created_at):
-    """
-    Helper for Rule 2.1: Post & Comment Risk Score calculation.
-    Determines an individual post or comment's risk score based on content score
-    and author's account age (<7 days = 1.5x multiplier).
-    """
-    _, base_score = moderate_content(content)
-    
-    if isinstance(author_created_at, str):
-        author_created_at = datetime.strptime(author_created_at, '%Y-%m-%d %H:%M:%S')
-        
-    account_age_days = (datetime.utcnow() - author_created_at).days
-    
-    if account_age_days < 7:
-        return base_score * 1.5
-    
-    return base_score
 
     
 # Assignment 2.1
@@ -986,11 +980,8 @@ def moderate_content(content):
             password: admin
     Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
-    """
-    Moderates content using a two-stage evaluation process:
-    - Stage 1.1: Severe violation checks (Immediate removal, max score 5.0).
-    - Stage 1.2: Scored violations & filtering (Additive scoring starting at 0.0).
-    """
+
+    #check if parameter is empty
     if not content or not content.strip():
         return content, 0.0
 
@@ -999,12 +990,14 @@ def moderate_content(content):
     # ---------------------------------------------------------
 
     # Rule 1.1.1 (Tier 1 Words): Case-insensitive, whole-word search
+    #check for tier1 words. Returns a warning if a word was found, and gives the harshest score.
     for word in TIER1_WORDS:
         pattern = re.compile(rf'\b{re.escape(word)}\b', re.IGNORECASE)
         if pattern.search(content):
             return "[content removed due to severe violation]", 5.0
 
     # Rule 1.1.2 (Tier 2 Phrases): Case-insensitive, whole-phrase search
+    # same as rule 1.1.1 but with a different warning
     for phrase in TIER2_PHRASES:
         pattern = re.compile(re.escape(phrase), re.IGNORECASE)
         if pattern.search(content):
@@ -1017,21 +1010,26 @@ def moderate_content(content):
     moderated_text = content
 
     # Rule 1.2.1 (Tier 3 Words): Whole-word replacement with *, +2.0 per match
+    # checks for tier 3 words
     for word in TIER3_WORDS:
         pattern = re.compile(rf'\b{re.escape(word)}\b', re.IGNORECASE)
         matches = len(pattern.findall(moderated_text))
+        #checks for multiple words and adds more score.
         if matches > 0:
             content_score += matches * 2.0
             moderated_text = pattern.sub('*' * len(word), moderated_text)
 
     # Rule 1.2.2 (External Links): Regex URL detection, replacement with [link removed], +2.0 per match
-    url_pattern = re.compile(r'https?://\S+|www\.\S+', re.IGNORECASE)
+    # checks if a word starts with https://, www. or ends with any .2-3lettercombination.
+    url_pattern = re.compile(r'https?://\S+|www\.\S+|.\S*\.[a-z]{2,3}$', re.IGNORECASE)
     url_matches = len(url_pattern.findall(moderated_text))
     if url_matches > 0:
+        #more score for multiple urls
         content_score += url_matches * 2.0
         moderated_text = url_pattern.sub('[link removed]', moderated_text)
 
     # Rule 1.2.3 (Excessive Capitalization): >15 alphabetic chars & >70% uppercase -> +0.5
+    #checks for uppercase capitalization. If the length is too long for a word, it checks how much of the word is uppercase.
     alpha_chars = [c for c in moderated_text if c.isalpha()]
     if len(alpha_chars) > 15:
         uppercase_count = sum(1 for c in alpha_chars if c.isupper())
@@ -1063,6 +1061,7 @@ def evaluate_post_risk(content):
         if score >= 5.0:
             warning_reason = "High risk content detected (severe policy violation or multiple links/profanities)."
         else:
+            #score is 3.0<score<5.0
             warning_reason = "Medium risk content detected (e.g., links, excessive caps, or profanity)."
 
     return moderated_content, score, needs_warning, warning_reason
