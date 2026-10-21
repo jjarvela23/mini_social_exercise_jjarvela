@@ -116,9 +116,20 @@ def feed():
 
     #  2. Build the Query 
     where_clause = ""
+
+    current_user_location = None
+    if current_user_id:
+        user_row = query_db('SELECT location FROM users WHERE id = ?', (current_user_id,), one=True)
+        if user_row and user_row['location']:
+            current_user_location = user_row['location'].strip().lower()
+
     if show == 'following' and current_user_id:
         where_clause = "WHERE p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?)"
         params.append(current_user_id)
+    elif show == 'near_me' and current_user_id and current_user_location:
+        # Matches posts from users with the same location string (case-insensitive)
+        where_clause = "WHERE LOWER(u.location) LIKE ?"
+        params.append(f"%{current_user_location.lower()}%")
 
     # Add the pagination parameters to the query arguments
     pagination_params = (POSTS_PER_PAGE, offset)
@@ -165,6 +176,23 @@ def feed():
             if follow_check:
                 followed_poster = True
 
+        # Determine if the current user lives in the same location as the poster
+        author_location = None
+        author_row = query_db('SELECT location FROM users WHERE id = ?', (post['user_id'],), one=True)
+        if author_row and author_row['location']:
+            author_location = author_row['location'].strip().lower()
+
+        lives_near_you = False
+        if (
+            current_user_id 
+            and post['user_id'] != current_user_id 
+            and current_user_location 
+            and author_location
+        ):
+            # Matches if locations overlap or match
+            if current_user_location in author_location or author_location in current_user_location:
+                lives_near_you = True
+
         # Determine if the current user reacted to this post and with what reaction
         user_reaction = None
         if current_user_id:
@@ -190,6 +218,7 @@ def feed():
             'reactions': reactions,
             'user_reaction': user_reaction,
             'followed_poster': followed_poster,
+            'lives_near_you': lives_near_you,
             'comments': comments_moderated
         })
 

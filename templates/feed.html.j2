@@ -34,13 +34,17 @@
     <a href="{{ url_for('feed', sort='recommended', show=current_show) }}" class="btn {% if current_sort == 'recommended' %}btn-primary{% else %}btn-light{% endif %}">Recommended</a>
   </div>
 
-  <!-- This is the 'show' filter for All / Following -->
+  <!-- This is the 'show' filter for All / Following / Near Me-->
   <!-- Following is only shown to logged in users -->
   {% if session.get('user_id') %}
   <div class="btn-group" role="group" aria-label="Filter posts">
     <!-- The link preserves the current_sort state -->
     <a href="{{ url_for('feed', sort=current_sort, show='all') }}" class="btn {% if current_show == 'all' %}btn-primary{% else %}btn-light{% endif %}">All</a>
     <a href="{{ url_for('feed', sort=current_sort, show='following') }}" class="btn {% if current_show == 'following' %}btn-primary{% else %}btn-light{% endif %}">Following</a>
+    <a href="{{ url_for('feed', sort=current_sort, show='near_me') }}" 
+       class="btn {% if current_show == 'near_me' %}btn-primary{% else %}btn-light{% endif %}">
+       Near Me
+    </a>
   </div>
    {% endif %}
 
@@ -58,6 +62,13 @@
 </a>
           {% else %}
           <a href="/u/{{ entry.post.user_id }}">{{ user_display(entry.post.username) }} </a>
+          {% endif %}
+
+          <!-- Lives near you badge -->
+          {% if entry.lives_near_you %}
+            <span class="badge bg-info text-dark ms-2" style="font-size: 0.75rem;">
+              Lives near you
+            </span>
           {% endif %}
         </h3>
 
