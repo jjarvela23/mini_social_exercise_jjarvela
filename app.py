@@ -6,6 +6,7 @@ import json
 import sqlite3
 import hashlib
 import re
+import math
 from datetime import datetime
 
 app = Flask(__name__)
@@ -27,10 +28,6 @@ TIER1_WORDS = MODERATION_CONFIG['categories']['tier1_severe_violations']['words'
 TIER2_PHRASES = MODERATION_CONFIG['categories']['tier2_spam_scams']['phrases']
 TIER3_WORDS = MODERATION_CONFIG['categories']['tier3_mild_profanity']['words']
 
-# ideas: 
-# add a line below the username that shows if one of your friends is following an account. design claim 14
-# design claim 16: personal conversations
-# polls
 
 def get_db():
     """
@@ -249,11 +246,24 @@ def add_post():
         (user_id, content)  # Or save `moderated_content` depending on your storage preference
     )
     db.commit()
+    
 
     if confirm_warning:
         flash('Your post was submitted with a content warning flag.', 'info')
     else:
         flash('Your post was successfully created!', 'success')
+
+    post_count = query_db('SELECT COUNT(*) as cnt FROM posts WHERE user_id = ?', (user_id,), one=True)['cnt']
+    stats = calculate_level_and_progress(post_count)
+
+    flash({
+        'title': 'Post Created!',
+        'type': 'Post',
+        'count': stats['current_count'],
+        'goal': stats['next_goal'],
+        'remaining': stats['remaining'],
+        'level': stats['level']
+    }, 'achievement_popup')
 
     return redirect(url_for('feed'))
     
@@ -325,6 +335,13 @@ def user_profile(username):
     followers_count = query_db('SELECT COUNT(*) as cnt FROM follows WHERE followed_id = ?', (user['id'],), one=True)['cnt']
     following_count = query_db('SELECT COUNT(*) as cnt FROM follows WHERE follower_id = ?', (user['id'],), one=True)['cnt']
 
+    # Count total posts and comments
+    post_count = query_db('SELECT COUNT(*) as cnt FROM posts WHERE user_id = ?', (user['id'],), one=True)['cnt']
+    comment_count = query_db('SELECT COUNT(*) as cnt FROM comments WHERE user_id = ?', (user['id'],), one=True)['cnt']
+
+    post_stats = calculate_level_and_progress(post_count)
+    comment_stats = calculate_level_and_progress(comment_count)
+
     #  NEW: CHECK FOLLOW STATUS 
     is_currently_following = False # Default to False
     current_user_id = session.get('user_id')
@@ -346,7 +363,9 @@ def user_profile(username):
                            comments=comments,
                            followers_count=followers_count, 
                            following_count=following_count,
-                           is_following=is_currently_following)
+                           is_following=is_currently_following,
+                           post_stats=post_stats,
+                           comment_stats=comment_stats)
     
 
 @app.route('/u/<username>/followers')
@@ -374,6 +393,60 @@ def user_following(username):
         WHERE f.follower_id = ?
     ''', (user['id'],))
     return render_template('user_list.html.j2', user=user, users=following, title="Users followed by")
+
+# --- GET: Fetch message history with a specific user ---
+@app.route('/messages/<int:recipient_id>')
+def get_messages(recipient_id):
+    sender_id = session.get('user_id')
+    if not sender_id:
+        return {'error': 'Unauthorized'}, 401
+
+    # Retrieve all messages between current_user and target user
+    messages_raw = query_db('''
+        SELECT m.id, m.sender_id, m.recipient_id, m.content, m.created_at, u.username as sender_name
+        FROM messages m
+        JOIN users u ON m.sender_id = u.id
+        WHERE (m.sender_id = ? AND m.recipient_id = ?)
+           OR (m.sender_id = ? AND m.recipient_id = ?)
+        ORDER BY m.created_at ASC
+    ''', (sender_id, recipient_id, recipient_id, sender_id))
+
+    messages = []
+    for msg in messages_raw:
+        msg_dict = dict(msg)
+        # Apply content moderation filter
+        msg_dict['content'], _ = moderate_content(msg_dict['content'])
+        messages.append(msg_dict)
+
+    return {'messages': messages, 'current_user_id': sender_id}
+
+# --- POST: Send a private message ---
+@app.route('/messages/<int:recipient_id>/send', methods=['POST'])
+def send_message(recipient_id):
+    sender_id = session.get('user_id')
+    if not sender_id:
+        flash('You must be logged in to send messages.', 'danger')
+        return redirect(url_for('login'))
+
+    content = request.form.get('content', '').strip()
+
+    if content:
+        # Pass content through moderation engine before saving
+        moderated_text, score = moderate_content(content)
+        
+        if moderated_text.startswith("[content removed"):
+            flash("Message could not be sent due to a policy violation.", "danger")
+            return redirect(request.referrer or url_for('feed'))
+
+        db = get_db()
+        db.execute(
+            'INSERT INTO messages (sender_id, recipient_id, content) VALUES (?, ?, ?)',
+            (sender_id, recipient_id, content)
+        )
+        db.commit()
+        flash("Message sent!", "success")
+
+    return redirect(request.referrer or url_for('feed'))
 
 @app.route('/posts/<int:post_id>')
 def post_detail(post_id):
@@ -524,7 +597,17 @@ def add_comment(post_id):
         db.execute('INSERT INTO comments (post_id, user_id, content) VALUES (?, ?, ?)',
                    (post_id, user_id, content))
         db.commit()
-        flash('Your comment was added.', 'success')
+        comment_count = query_db('SELECT COUNT(*) as cnt FROM comments WHERE user_id = ?', (user_id,), one=True)['cnt']
+        stats = calculate_level_and_progress(comment_count)
+
+        flash({
+            'title': 'Comment Added!',
+            'type': 'Comment',
+            'count': stats['current_count'],
+            'goal': stats['next_goal'],
+            'remaining': stats['remaining'],
+            'level': stats['level']
+        }, 'achievement_popup')
     else:
         flash('Comment cannot be empty.', 'warning')
 
@@ -891,6 +974,53 @@ def loop_color(user_id):
     b = int(h[4:6], 16)
     return f'rgb({r % 128 + 80}, {g % 128 + 80}, {b % 128 + 80})'
 
+# Coding assignment #1
+
+BASE_TARGET = 10  # Level 1 target
+
+def calculate_level_and_progress(total_count):
+    """
+    Calculates current level, current level progress, and next level goal.
+    Formula for goal at level L: 10 * (2 ** (L - 1))
+    """
+    if total_count <= 0:
+        return {
+            'level': 1,
+            'current_progress': 0,
+            'next_goal': BASE_TARGET,
+            'remaining': BASE_TARGET,
+            'percentage': 0
+        }
+
+    # Level L requires cumulative threshold or doubling goal per level
+    # Level 1: 0 - 10
+    # Level 2: 10 - 20
+    # Level 3: 20 - 40, etc.
+    
+    level = 1
+    current_goal = BASE_TARGET
+
+    # Determine current level
+    while total_count >= current_goal:
+        level += 1
+        current_goal *= 2
+
+    remaining = current_goal - total_count
+    
+    # Calculate progress percentage within current level range
+    prev_goal = current_goal // 2 if level > 1 else 0
+    progress_in_level = total_count - prev_goal
+    needed_in_level = current_goal - prev_goal
+    percentage = min(100, int((progress_in_level / needed_in_level) * 100))
+
+    return {
+        'level': level,
+        'current_count': total_count,
+        'next_goal': current_goal,
+        'remaining': remaining,
+        'percentage': percentage
+    }
+
 
 # ----- Functions to be implemented are below
 # Coding Assignment #2
@@ -1092,6 +1222,25 @@ def recommend(user_id, filter_following):
 
     return recommended_posts;
 
+def init_message_database():
+    """Creates a new table for storing private messages
+    """
+    db = get_db()
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sender_id INTEGER NOT NULL,
+        recipient_id INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (recipient_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    ''')
+    db.commit()
+
 if __name__ == '__main__':
+    with app.app_context():
+        init_message_database()
     app.run(debug=True, port=8080)
 

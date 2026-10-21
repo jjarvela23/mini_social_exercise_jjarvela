@@ -107,6 +107,43 @@
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
 
 {% include "footer.html.j2" %}
+
+<!-- Achievement Progress Popup Modal -->
+{% with messages = get_flashed_messages(category_filter=["achievement_popup"]) %}
+  {% if messages %}
+    {% set popup = messages[0] %}
+    <div class="modal fade" id="achievementModal" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content text-center">
+          <div class="modal-header bg-primary text-white">
+            <h5 class="modal-title w-100">🎉 {{ popup.title }}</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body py-4">
+            <h4>Level {{ popup.level }} {{ popup.type }} Progress</h4>
+            <p class="fs-5 my-3">
+              <strong>{{ popup.count }}</strong> out of <strong>{{ popup.goal }}</strong> {{ popup.type|lower }}s created!
+            </p>
+            <div class="alert alert-info py-2 mb-0">
+              Only <strong>{{ popup.remaining }}</strong> more to reach <strong>Level {{ popup.level + 1 }}</strong>!
+            </div>
+          </div>
+          <div class="modal-footer justify-content-center">
+            <button type="button" class="btn btn-primary px-4" data-bs-dismiss="modal">Keep Going!</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      document.addEventListener("DOMContentLoaded", function() {
+        var achievementModal = new bootstrap.Modal(document.getElementById('achievementModal'));
+        achievementModal.show();
+      });
+    </script>
+  {% endif %}
+{% endwith %}
+
 </body>
 </html>
 <script>
