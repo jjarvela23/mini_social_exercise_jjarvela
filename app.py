@@ -117,6 +117,20 @@ def feed():
     current_user_id = session.get('user_id')
     params = []
 
+    can_post = True
+    posting_requirements = None
+
+    # Check if the current user can post and give details to the template
+    if current_user_id:
+        allowed, r_count, c_count = can_user_post(current_user_id)
+        can_post = allowed
+        posting_requirements = {
+            'reactions_left': max(0, 3 - r_count),
+            'comments_left': max(0, 1 - c_count),
+            'reactions_current': r_count,
+            'comments_current': c_count
+        }
+
     #  2. Build the Query 
     where_clause = ""
 
@@ -235,7 +249,9 @@ def feed():
                            per_page=POSTS_PER_PAGE, # Pass items per page
                            reaction_emojis=REACTION_EMOJIS,
                            reaction_types=REACTION_TYPES,
-                           weekly_stats=weekly_stats)
+                           weekly_stats=weekly_stats,
+                           can_post=can_post,
+                           posting_requirements=posting_requirements)
 
 @app.route('/posts/new', methods=['POST'])
 def add_post():
@@ -246,6 +262,12 @@ def add_post():
     if not user_id:
         flash('You must be logged in to create a post.', 'danger')
         return redirect(url_for('login'))
+
+    # Block user if they have not met the requirements
+    allowed, r_count, c_count = can_user_post(user_id)
+    if not allowed:
+        flash('You must react to 3 posts and post 1 comment before you can create a new post.', 'warning')
+        return redirect(url_for('feed'))
 
     # Get content from the submitted form
     content = request.form.get('content')
@@ -1404,6 +1426,7 @@ def can_user_post(user_id):
         one=True
     )['cnt']
 
+    #check the counts
     can_post = (reaction_count >= 3) and (comment_count >= 1)
     
     return can_post, reaction_count, comment_count

@@ -10,13 +10,44 @@
 <div class="col-md-8 mx-auto mb-4">
   <div class="card shadow-sm">
     <div class="card-body">
-      <h5 class="card-title">Create a new post</h5>
-      <form action="{{ url_for('add_post') }}" method="POST">
-        <div class="mb-3">
-          <textarea class="form-control" name="content" rows="3" placeholder="What's on your mind, {{ session.get('username') }}?" required></textarea>
+      {% if can_post %}
+        <h5 class="card-title">Create a new post</h5>
+        <form action="{{ url_for('add_post') }}" method="POST">
+          <div class="mb-3">
+            <textarea class="form-control" name="content" rows="3" placeholder="What's on your mind, {{ session.get('username') }}?" required></textarea>
+          </div>
+          <button type="submit" class="btn btn-primary float-end">Post</button>
+        </form>
+
+        {% else %}
+        <!-- Requirement Notice for Restricted Users -->
+        <div class="text-center py-2">
+          <h5 class="card-title text-warning mb-2">Post Creation Locked</h5>
+          <p class="card-text text-muted mb-3">
+            To prevent spam, new accounts must interact with the community before posting.
+          </p>
+          
+          <div class="d-flex justify-content-center gap-3">
+            <span class="badge {% if posting_requirements.reactions_current >= 3 %}bg-success{% else %}bg-secondary{% endif %} p-2 fs-6">
+              Reactions: {{ posting_requirements.reactions_current }} / 3
+              {% if posting_requirements.reactions_left > 0 %}
+                ({{ posting_requirements.reactions_left }} more needed)
+              {% else %}
+                ✓
+              {% endif %}
+            </span>
+
+            <span class="badge {% if posting_requirements.comments_current >= 1 %}bg-success{% else %}bg-secondary{% endif %} p-2 fs-6">
+              Comments: {{ posting_requirements.comments_current }} / 1
+              {% if posting_requirements.comments_left > 0 %}
+                (1 more needed)
+              {% else %}
+                ✓
+              {% endif %}
+            </span>
+          </div>
         </div>
-        <button type="submit" class="btn btn-primary float-end">Post</button>
-      </form>
+      {% endif %}
     </div>
   </div>
 </div>
