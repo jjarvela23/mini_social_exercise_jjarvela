@@ -26,6 +26,22 @@
 
 <div class="mb-4 text-center">
 
+<!-- Weekly Community Goal Banner -->
+{% if weekly_stats %}
+<div class="col-md-8 mx-auto mb-4">
+  <div class="card bg-light border-info shadow-sm text-center">
+    <div class="card-body py-3">
+      <h6 class="card-subtitle text-primary fw-bold mb-1">
+        Community Activity This Week
+      </h6>
+      <p class="card-text mb-0 fs-6">
+        {{ weekly_stats.message }}
+      </p>
+    </div>
+  </div>
+</div>
+{% endif %}
+
 <!-- This is the 'sort' filter for New / Popular / Recommended -->
   <div class="btn-group me-5" role="group" aria-label="Sort posts">
     <!-- The link preserves the current_show state -->

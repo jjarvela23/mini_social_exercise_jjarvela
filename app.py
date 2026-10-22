@@ -111,6 +111,9 @@ def feed():
     POSTS_PER_PAGE = 10
     offset = (page - 1) * POSTS_PER_PAGE
 
+    # Get weekly stats
+    weekly_stats = get_weekly_post_stats()
+
     current_user_id = session.get('user_id')
     params = []
 
@@ -231,7 +234,8 @@ def feed():
                            page=page, # Pass current page number
                            per_page=POSTS_PER_PAGE, # Pass items per page
                            reaction_emojis=REACTION_EMOJIS,
-                           reaction_types=REACTION_TYPES)
+                           reaction_types=REACTION_TYPES,
+                           weekly_stats=weekly_stats)
 
 @app.route('/posts/new', methods=['POST'])
 def add_post():
@@ -1245,9 +1249,164 @@ def recommend(user_id, filter_following):
     - https://www.researchgate.net/publication/227268858_Recommender_Systems_Handbook
     """
 
-    recommended_posts = {} 
+    if not user_id:
+        # Fallback for logged-out users: return the 5 newest posts overall
+        return query_db('''
+            SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+            FROM posts p
+            JOIN users u ON p.user_id = u.id
+            ORDER BY p.created_at DESC
+            LIMIT 5
+        ''')
 
-    return recommended_posts;
+    POSITIVE_REACTIONS = ('like', 'love', 'laugh', 'wow')
+
+    if filter_following:
+        # Strict recommendations within the followed network
+        query = '''
+            SELECT DISTINCT p.id, p.content, p.created_at, u.username, u.id as user_id
+            FROM posts p
+            JOIN users u ON p.user_id = u.id
+            WHERE p.user_id IN (
+                SELECT followed_id FROM follows WHERE follower_id = ?
+            )
+            AND p.user_id != ?
+            ORDER BY p.created_at DESC
+            LIMIT 5
+        '''
+        recommended_posts = query_db(query, (user_id, user_id))
+    else:
+        # Broad recommendations: Network posts + posts from creators the user reacted positively to
+        placeholders = ','.join('?' for _ in POSITIVE_REACTIONS)
+        query = f'''
+            SELECT DISTINCT p.id, p.content, p.created_at, u.username, u.id as user_id
+            FROM posts p
+            JOIN users u ON p.user_id = u.id
+            WHERE p.user_id != ?
+              AND (
+                -- Signal 1: Posts from users the current user follows
+                p.user_id IN (
+                    SELECT followed_id FROM follows WHERE follower_id = ?
+                )
+                OR
+                -- Signal 2: Posts from users whose content the current user reacted positively to
+                p.user_id IN (
+                    SELECT DISTINCT p2.user_id
+                    FROM reactions r
+                    JOIN posts p2 ON r.post_id = p2.id
+                    WHERE r.user_id = ? AND r.reaction_type IN ({placeholders})
+                )
+              )
+            ORDER BY p.created_at DESC
+            LIMIT 5
+        '''
+        params = [user_id, user_id, user_id] + list(POSITIVE_REACTIONS)
+        recommended_posts = query_db(query, params)
+
+    # Fallback: If recommendation signals produce fewer than 5 posts, fill with top new posts
+    if not recommended_posts or len(recommended_posts) < 5:
+        existing_ids = [p['id'] for p in recommended_posts] if recommended_posts else []
+        needed = 5 - len(existing_ids)
+
+        if existing_ids:
+            id_placeholders = ','.join('?' for _ in existing_ids)
+            fallback_query = f'''
+                SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+                FROM posts p
+                JOIN users u ON p.user_id = u.id
+                WHERE p.user_id != ? AND p.id NOT IN ({id_placeholders})
+                ORDER BY p.created_at DESC
+                LIMIT ?
+            '''
+            fallback_params = [user_id] + existing_ids + [needed]
+        else:
+            fallback_query = '''
+                SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+                FROM posts p
+                JOIN users u ON p.user_id = u.id
+                WHERE p.user_id != ?
+                ORDER BY p.created_at DESC
+                LIMIT ?
+            '''
+            fallback_params = [user_id, needed]
+
+        additional_posts = query_db(fallback_query, fallback_params)
+        
+        # Combine lists while maintaining reverse-chronological order
+        combined = list(recommended_posts) if recommended_posts else []
+        if additional_posts:
+            combined.extend(additional_posts)
+            combined.sort(key=lambda x: x['created_at'], reverse=True)
+            recommended_posts = combined[:5]
+
+    return recommended_posts
+
+# Assignment 3.2 show weekly stats
+
+def get_weekly_post_stats():
+    """
+    Returns the total number of posts created this week 
+    and the number of unique users who posted.
+    """
+    # SQLite strftime('%Y-%W', 'now') calculates year and week number
+    stats = query_db('''
+        SELECT 
+            COUNT(id) as total_posts,
+            COUNT(DISTINCT user_id) as unique_posters
+        FROM posts
+        WHERE strftime('%Y-%W', created_at) = strftime('%Y-%W', 'now')
+    ''', one=True)
+    
+    total_posts = stats['total_posts'] if stats and stats['total_posts'] else 0
+    unique_posters = stats['unique_posters'] if stats and stats['unique_posters'] else 0
+    
+    # Milestone messages based on post count or unique poster count
+    milestone_message = None
+    if total_posts >= 100:
+        milestone_message = f"Incredible! {total_posts} posts made this week! The community is on fire!"
+    elif total_posts >= 50:
+        milestone_message = f"We hit {total_posts} posts this week! Let's aim for 100!"
+    elif total_posts >= 20 or unique_posters >= 10:
+        milestone_message = f"{unique_posters} people have posted this week ({total_posts} posts total). Let's keep this up!"
+    elif total_posts >= 5:
+        milestone_message = f"{total_posts} posts so far this week! Share something to keep the momentum going!"
+    else:
+        milestone_message = "✨ A fresh week starts! Be the first to start the conversation today!"
+
+    return {
+        'total_posts': total_posts,
+        'unique_posters': unique_posters,
+        'message': milestone_message
+    }
+
+# Assignment 3.3 Checking if a new user is allowed to post.
+
+def can_user_post(user_id):
+    """
+    Checks if a user meets the posting requirements:
+    At least 3 reactions AND at least 1 comment.
+    Returns (can_post: bool, reactions_count: int, comments_count: int)
+    """
+    if not user_id:
+        return False, 0, 0
+
+    # Count total reactions by the user
+    reaction_count = query_db(
+        'SELECT COUNT(*) as cnt FROM reactions WHERE user_id = ?', 
+        (user_id,), 
+        one=True
+    )['cnt']
+
+    # Count total comments by the user
+    comment_count = query_db(
+        'SELECT COUNT(*) as cnt FROM comments WHERE user_id = ?', 
+        (user_id,), 
+        one=True
+    )['cnt']
+
+    can_post = (reaction_count >= 3) and (comment_count >= 1)
+    
+    return can_post, reaction_count, comment_count
 
 def init_message_database():
     """
