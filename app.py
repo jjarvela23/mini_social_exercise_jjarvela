@@ -117,6 +117,7 @@ def feed():
     #  2. Build the Query 
     where_clause = ""
 
+    # Get location of the current user
     current_user_location = None
     if current_user_id:
         user_row = query_db('SELECT location FROM users WHERE id = ?', (current_user_id,), one=True)
@@ -127,7 +128,7 @@ def feed():
         where_clause = "WHERE p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?)"
         params.append(current_user_id)
     elif show == 'near_me' and current_user_id and current_user_location:
-        # Matches posts from users with the same location string (case-insensitive)
+        # Matches posts from users with the same location (case-insensitive)
         where_clause = "WHERE LOWER(u.location) LIKE ?"
         params.append(f"%{current_user_location.lower()}%")
 
@@ -285,6 +286,7 @@ def add_post():
     post_count = query_db('SELECT COUNT(*) as cnt FROM posts WHERE user_id = ?', (user_id,), one=True)['cnt']
     stats = calculate_level_and_progress(post_count)
 
+    # Popup that shows the post progress
     flash({
         'title': 'Post Created!',
         'type': 'Post',
@@ -423,14 +425,14 @@ def user_following(username):
     ''', (user['id'],))
     return render_template('user_list.html.j2', user=user, users=following, title="Users followed by")
 
-# --- GET: Fetch message history with a specific user ---
+# Fetch message history with a specific user 
 @app.route('/messages/<int:recipient_id>')
 def get_messages(recipient_id):
     sender_id = session.get('user_id')
     if not sender_id:
         return {'error': 'Unauthorized'}, 401
 
-    # Retrieve all messages between current_user and target user
+    # Retrieve all messages between current user and target user
     messages_raw = query_db('''
         SELECT m.id, m.sender_id, m.recipient_id, m.content, m.created_at, u.username as sender_name
         FROM messages m
@@ -449,7 +451,7 @@ def get_messages(recipient_id):
 
     return {'messages': messages, 'current_user_id': sender_id}
 
-# --- POST: Send a private message ---
+# Send a private message 
 @app.route('/messages/<int:recipient_id>/send', methods=['POST'])
 def send_message(recipient_id):
     sender_id = session.get('user_id')
@@ -460,7 +462,7 @@ def send_message(recipient_id):
     content = request.form.get('content', '').strip()
 
     if content:
-        # Pass content through moderation engine before saving
+        # Pass content through moderation 
         moderated_text, score = moderate_content(content)
         
         if moderated_text.startswith("[content removed"):
@@ -629,6 +631,7 @@ def add_comment(post_id):
         comment_count = query_db('SELECT COUNT(*) as cnt FROM comments WHERE user_id = ?', (user_id,), one=True)['cnt']
         stats = calculate_level_and_progress(comment_count)
 
+        # Popup that shows the comment progress
         flash({
             'title': 'Comment Added!',
             'type': 'Comment',
@@ -1010,7 +1013,7 @@ BASE_TARGET = 10  # Level 1 target
 def calculate_level_and_progress(total_count):
     """
     Calculates current level, current level progress, and next level goal.
-    Formula for goal at level L: 10 * (2 ** (L - 1))
+    Formula for goal at level: Base_target * (2 ** (Level - 1))
     """
     if total_count <= 0:
         return {
@@ -1020,11 +1023,6 @@ def calculate_level_and_progress(total_count):
             'remaining': BASE_TARGET,
             'percentage': 0
         }
-
-    # Level L requires cumulative threshold or doubling goal per level
-    # Level 1: 0 - 10
-    # Level 2: 10 - 20
-    # Level 3: 20 - 40, etc.
     
     level = 1
     current_goal = BASE_TARGET
@@ -1036,7 +1034,7 @@ def calculate_level_and_progress(total_count):
 
     remaining = current_goal - total_count
     
-    # Calculate progress percentage within current level range
+    # Convert to percentage in the current level
     prev_goal = current_goal // 2 if level > 1 else 0
     progress_in_level = total_count - prev_goal
     needed_in_level = current_goal - prev_goal
@@ -1252,7 +1250,8 @@ def recommend(user_id, filter_following):
     return recommended_posts;
 
 def init_message_database():
-    """Creates a new table for storing private messages
+    """
+    Creates a new table for storing private messages
     """
     db = get_db()
     db.execute('''
