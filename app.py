@@ -135,19 +135,25 @@ def feed():
     where_clause = ""
 
     # Get location of the current user
-    current_user_location = None
+    current_user_parts = []
     if current_user_id:
         user_row = query_db('SELECT location FROM users WHERE id = ?', (current_user_id,), one=True)
         if user_row and user_row['location']:
-            current_user_location = user_row['location'].strip().lower()
+            current_user_parts = get_location_parts(user_row['location'])
 
     if show == 'following' and current_user_id:
         where_clause = "WHERE p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?)"
         params.append(current_user_id)
-    elif show == 'near_me' and current_user_id and current_user_location:
-        # Matches posts from users with the same location (case-insensitive)
-        where_clause = "WHERE LOWER(u.location) LIKE ?"
-        params.append(f"%{current_user_location.lower()}%")
+    elif show == 'near_me' and current_user_id:
+        if current_user_parts:
+            # Build dynamic OR clauses for each location part (city or country)
+            like_clauses = []
+            for part in current_user_parts:
+                like_clauses.append("LOWER(u.location) LIKE ?")
+                params.append(f"%{part}%")
+            where_clause = f"WHERE ({' OR '.join(like_clauses)})"
+        else:
+            where_clause = "WHERE 1=0"  # No location set, return no posts
 
     # Add the pagination parameters to the query arguments
     pagination_params = (POSTS_PER_PAGE, offset)
@@ -167,8 +173,8 @@ def feed():
         """
         final_params = params + list(pagination_params)
         posts = query_db(query, final_params)
-    elif sort == 'recommended':
-        posts = recommend(current_user_id, show == 'following' and current_user_id)
+    elif sort == 'recommended': 
+        posts = recommend(current_user_id, show=='following' and current_user_id, show=='near_me' and current_user_id)
     else:  # Default sort is 'new'
         query = f"""
             SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
@@ -201,15 +207,18 @@ def feed():
             author_location = author_row['location'].strip().lower()
 
         lives_near_you = False
-        if (
-            current_user_id 
-            and post['user_id'] != current_user_id 
-            and current_user_location 
-            and author_location
-        ):
-            # Matches if locations overlap or match
-            if current_user_location in author_location or author_location in current_user_location:
-                lives_near_you = True
+        if current_user_id and post['user_id'] != current_user_id and current_user_parts:
+            author_row = query_db('SELECT location FROM users WHERE id = ?', (post['user_id'],), one=True)
+            if author_row and author_row['location']:
+                author_parts = get_location_parts(author_row['location'])
+                # Check if any city or country part overlaps
+                for cp in current_user_parts:
+                    for ap in author_parts:
+                        if cp == ap or cp in ap or ap in cp:
+                            lives_near_you = True
+                            break
+                    if lives_near_you:
+                        break
 
         # Determine if the current user reacted to this post and with what reaction
         user_reaction = None
@@ -1074,6 +1083,13 @@ def calculate_level_and_progress(total_count):
         'percentage': percentage
     }
 
+# Helper function for parsing the location string.
+def get_location_parts(location_str):
+    """Splits a location string by commas and normalizes text."""
+    if not location_str:
+        return []
+    return [p.strip().lower() for p in location_str.split(',') if p.strip()]
+
 
 # ----- Functions to be implemented are below
 # Coding Assignment #2
@@ -1251,7 +1267,7 @@ def evaluate_post_risk(content):
 
 # Coding Assignment #3
 # Assignment 3.1
-def recommend(user_id, filter_following):
+def recommend(user_id, filter_following, filter_near):
     """
     Args:
         user_id: The ID of the current user.
@@ -1272,68 +1288,76 @@ def recommend(user_id, filter_following):
     """
 
     if not user_id:
-        # Fallback for logged-out users: return the 5 newest posts overall
         return query_db('''
-            SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+            SELECT p.id, p.content, p.created_at, u.username, u.id as user_id, u.location
             FROM posts p
             JOIN users u ON p.user_id = u.id
             ORDER BY p.created_at DESC
             LIMIT 5
         ''')
 
-    POSITIVE_REACTIONS = ('like', 'love', 'laugh', 'wow')
+    # Fetch current user's location parts for 'near' filtering
+    user_row = query_db('SELECT location FROM users WHERE id = ?', (user_id,), one=True)
+    user_parts = get_location_parts(user_row['location']) if user_row else []
 
+    params = [user_id]  # Exclude current user's own posts
+    where_clauses = ["p.user_id != ?"]
+
+    # 1. Filter by location ("Near You") if enabled
+    if filter_near:
+        if not user_parts:
+            return []  # User has no location set, so no nearby posts can be found
+        near_clauses = []
+        for part in user_parts:
+            near_clauses.append("LOWER(u.location) LIKE ?")
+            params.append(f"%{part}%")
+        where_clauses.append(f"({' OR '.join(near_clauses)})")
+
+    # 2. Filter by following network if enabled
     if filter_following:
-        # Strict recommendations within the followed network
-        query = '''
-            SELECT DISTINCT p.id, p.content, p.created_at, u.username, u.id as user_id
-            FROM posts p
-            JOIN users u ON p.user_id = u.id
-            WHERE p.user_id IN (
-                SELECT followed_id FROM follows WHERE follower_id = ?
-            )
-            AND p.user_id != ?
-            ORDER BY p.created_at DESC
-            LIMIT 5
-        '''
-        recommended_posts = query_db(query, (user_id, user_id))
-    else:
-        # Broad recommendations: Network posts + posts from creators the user reacted positively to
+        where_clauses.append("p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?)")
+        params.append(user_id)
+
+    # 3. Default recommendation signals (Follows OR Positive Reactions) if no strict filters are active
+    if not filter_following and not filter_near:
+        POSITIVE_REACTIONS = ('like', 'love', 'laugh', 'wow')
         placeholders = ','.join('?' for _ in POSITIVE_REACTIONS)
-        query = f'''
-            SELECT DISTINCT p.id, p.content, p.created_at, u.username, u.id as user_id
-            FROM posts p
-            JOIN users u ON p.user_id = u.id
-            WHERE p.user_id != ?
-              AND (
-                -- Signal 1: Posts from users the current user follows
-                p.user_id IN (
-                    SELECT followed_id FROM follows WHERE follower_id = ?
-                )
+        
+        signal_clause = f"""
+            (
+                p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?)
                 OR
-                -- Signal 2: Posts from users whose content the current user reacted positively to
                 p.user_id IN (
                     SELECT DISTINCT p2.user_id
                     FROM reactions r
                     JOIN posts p2 ON r.post_id = p2.id
                     WHERE r.user_id = ? AND r.reaction_type IN ({placeholders})
                 )
-              )
-            ORDER BY p.created_at DESC
-            LIMIT 5
-        '''
-        params = [user_id, user_id, user_id] + list(POSITIVE_REACTIONS)
-        recommended_posts = query_db(query, params)
+            )
+        """
+        where_clauses.append(signal_clause)
+        params.extend([user_id, user_id] + list(POSITIVE_REACTIONS))
 
-    # Fallback: If recommendation signals produce fewer than 5 posts, fill with top new posts
-    if not recommended_posts or len(recommended_posts) < 5:
+    query = f"""
+        SELECT DISTINCT p.id, p.content, p.created_at, u.username, u.id as user_id, u.location
+        FROM posts p
+        JOIN users u ON p.user_id = u.id
+        WHERE {' AND '.join(where_clauses)}
+        ORDER BY p.created_at DESC
+        LIMIT 5
+    """
+
+    recommended_posts = query_db(query, params)
+
+    # Fallback: If default recommendations yield fewer than 5 posts, pad with top global posts
+    if not filter_following and not filter_near and (not recommended_posts or len(recommended_posts) < 5):
         existing_ids = [p['id'] for p in recommended_posts] if recommended_posts else []
         needed = 5 - len(existing_ids)
 
         if existing_ids:
             id_placeholders = ','.join('?' for _ in existing_ids)
             fallback_query = f'''
-                SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+                SELECT p.id, p.content, p.created_at, u.username, u.id as user_id, u.location
                 FROM posts p
                 JOIN users u ON p.user_id = u.id
                 WHERE p.user_id != ? AND p.id NOT IN ({id_placeholders})
@@ -1343,7 +1367,7 @@ def recommend(user_id, filter_following):
             fallback_params = [user_id] + existing_ids + [needed]
         else:
             fallback_query = '''
-                SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+                SELECT p.id, p.content, p.created_at, u.username, u.id as user_id, u.location
                 FROM posts p
                 JOIN users u ON p.user_id = u.id
                 WHERE p.user_id != ?
@@ -1353,10 +1377,8 @@ def recommend(user_id, filter_following):
             fallback_params = [user_id, needed]
 
         additional_posts = query_db(fallback_query, fallback_params)
-        
-        # Combine lists while maintaining reverse-chronological order
-        combined = list(recommended_posts) if recommended_posts else []
         if additional_posts:
+            combined = list(recommended_posts) if recommended_posts else []
             combined.extend(additional_posts)
             combined.sort(key=lambda x: x['created_at'], reverse=True)
             recommended_posts = combined[:5]
